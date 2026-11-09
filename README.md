@@ -3,6 +3,13 @@
 Documento de resolución y acciones para poner en funcionamiento el adaptador
 USB 3.0 a HDMI **StarTech USB32HDES** en Linux.
 
+> **Nota para Ubuntu 26.04 / kernel 7.x:** el EVDI 1.14.8 incluido en
+> `ubuntu_T6_250422.run` **no compila** en el kernel 7.0. `install-usb32hdes.sh`
+> detecta el sistema y, en ese caso, compila **EVDI 1.15.1** de DisplayLink y el
+> demonio T6 de MCT contra él. Además, EVDI/T6 solo funciona en **X11**;
+> Ubuntu 26.04 Budgie arranca en Wayland (labwc), así que hay que usar una
+> sesión X11 para que aparezca la pantalla.
+
 ---
 
 ## 1. Resumen del problema
@@ -98,32 +105,47 @@ Instalador: `ubuntu_T6_250422.run` (script + `evdi.tar.gz` + `evdi_t6.tar.gz`).
 > El instalador más reciente de MCT (`ubuntu_T6_260223.run`) se distribuye por
 > SharePoint con inicio de sesión. El mirror comunitario es el mismo driver de
 > MCT y ya incluye soporte para `0x5601`.
+>
+> De ese `.run` se reutiliza el demonio T6 (`evdi_t6.tar.gz`). El EVDI
+> empaquetado (`evdi.tar.gz`, versión 1.14.8) solo se usa en el caso conocido
+> Ubuntu 24.04 + kernel 6.8; en kernels 7.x se sustituye por EVDI 1.15.1.
 
 ### 4.1. Script automático
 
-El repositorio incluye `install-usb32hdes.sh`, que automatiza las validaciones
-y la instalación:
+El repositorio incluye `install-usb32hdes.sh`, que detecta el sistema y aplica
+la variante que corresponde:
+
+| Sistema detectado | EVDI usado |
+|---|---|
+| Ubuntu 24.04 + kernel 6.8 | EVDI incluido en el `.run` de MCT |
+| Ubuntu 26.04 / kernel 7.x | **EVDI 1.15.1** de DisplayLink |
+| Cualquier otro caso | **EVDI 1.15.1** de DisplayLink |
 
 ```bash
 chmod +x install-usb32hdes.sh
 
-sudo ./install-usb32hdes.sh install   # valida, descarga e instala (reinicia)
+sudo ./install-usb32hdes.sh install   # detecta, compila e instala
 sudo ./install-usb32hdes.sh verify    # comprueba el estado tras el reinicio
 sudo ./install-usb32hdes.sh backup    # solo backup de configuración
 sudo ./install-usb32hdes.sh uninstall # desinstala y libera el kernel
 ```
 
-Opciones: `--force` (reinstalar) y `--yes` (sin confirmación).
+Opciones: `--force` (reinstalar), `--yes` (sin confirmación) y
+`--allow-wayland` (permitir la instalación en Wayland, sabiendo que no habrá
+salida de vídeo hasta entrar en X11).
 
 Validaciones que aplica antes de instalar:
 
-- Ubuntu >= 24.04 y headers del kernel actual.
-- Estado de Secure Boot y sesión gráfica (X11/Wayland).
+- Ubuntu >= 24.04, versión de kernel y headers del kernel actual.
+- Estado de Secure Boot y sesión gráfica (X11/Wayland). En Wayland se aborta
+  salvo que se use `--allow-wayland`.
 - Presencia del dispositivo `0711:5601`, espacio en disco y conectividad.
 - Dependencias de compilación e instalación.
 - Backup de `/etc/modules`, `/etc/modprobe.d`, `libevdi` y units de systemd.
-- Integridad del `.run`: contiene `evdi.tar.gz` y `evdi_t6.tar.gz`, y su
-  `main.c` acepta `0x0711` / `0x5600`.
+- Integridad del `.run`: contiene `evdi_t6.tar.gz` y su `main.c` acepta
+  `0x0711` / `0x5600`.
+- Si usa EVDI 1.15.1, elimina `-Werror` del Makefile porque los headers del
+  kernel 7.0 generan warnings que de otro modo rompen la compilación.
 
 ---
 
@@ -149,45 +171,68 @@ sudo apt update && sudo apt install -y timeshift
 sudo timeshift --create --comments "antes de driver T6"
 ```
 
-### 5.2. Descargar el instalador
+### 5.2. Descargar las fuentes
+
+El script lo hace automáticamente. Si se quiere hacer a mano:
 
 ```bash
-curl -fL -o /tmp/ubuntu_T6_250422.run \
+work="$(mktemp -d /tmp/usb32hdes.XXXXXX)"
+
+curl -fL -o "$work/ubuntu_T6_250422.run" \
   https://raw.githubusercontent.com/carlosmax3D/startech-usba-hdmi-linux-driver/main/ubuntu_T6_250422.run
+
+curl -fL -o "$work/evdi-1.15.1.tar.gz" \
+  https://github.com/DisplayLink/evdi/archive/refs/tags/v1.15.1.tar.gz
 ```
 
-Verificar que contiene los dos tarballs y que el `main.c` soporta `0x5600`:
+> **No uses rutas fijas en `/tmp`.** Si el fichero ya existe y pertenece a otro
+> usuario (por ejemplo, de una ejecución anterior con `sudo`), `curl` falla con
+> `Permission denied` / `curl: (23)` debido a `fs.protected_regular=2`.
+
+Verificar que el `.run` contiene el demonio T6 y que su `main.c` soporta
+`0x5600`:
 
 ```bash
-python3 - <<'PY'
+python3 - "$work/ubuntu_T6_250422.run" "$work/t6-inner.tar.gz" <<'PY'
 import sys
-d=open('/tmp/ubuntu_T6_250422.run','rb').read()
-i=d.find(b'\x1f\x8b')
-open('/tmp/t6-inner.tar.gz','wb').write(d[i:])
+d = open(sys.argv[1], 'rb').read()
+i = d.find(b'\x1f\x8b')
+open(sys.argv[2], 'wb').write(d[i:])
 PY
-tar tzf /tmp/t6-inner.tar.gz
+tar tzf "$work/t6-inner.tar.gz"     # debe listar evdi_t6.tar.gz
 ```
 
-Debe listar `evdi.tar.gz` y `evdi_t6.tar.gz`.
+> **Importante:** no ejecutes `ubuntu_T6_250422.run` directamente en Ubuntu
+> 26.04 / kernel 7.x. Su EVDI 1.14.8 no compila y el instalador termina con
+> `Driver Installation Failed`. Usa el script.
 
 ### 5.3. Instalar
 
 ```bash
-chmod +x /tmp/ubuntu_T6_250422.run
-sudo /tmp/ubuntu_T6_250422.run
+chmod +x install-usb32hdes.sh
+sudo ./install-usb32hdes.sh install
 ```
 
-El instalador:
+El script:
 
-1. instala dependencias (`gcc`, `make`, `libturbojpeg`, `libdrm-dev`,
-   `libusb-1.0-0-dev`, `libelf-dev`, `build-essential`, ...)
-2. fija el kernel (`apt-mark hold linux-generic linux-image-generic
-   linux-headers-generic`)
-3. compila `evdi.ko` y `T6evdi`
-4. copia el módulo a `/lib/modules/$(uname -r)/kernel/drivers/video/`
-5. crea los servicios `T6evdi`, `T6poweron`, `T6powerdown`
-6. añade `evdi` a `/etc/modules`
-7. **reinicia el equipo**
+1. detecta la distro, la versión de kernel y la sesión gráfica;
+2. elige el EVDI adecuado (incluido en MCT para 24.04/6.8, o 1.15.1 para
+   kernel 7.x);
+3. instala dependencias (`gcc`, `make`, `libturbojpeg`, `libdrm-dev`,
+   `libusb-1.0-0-dev`, `libelf-dev`, `build-essential`, ...);
+4. compila `evdi.ko`, `libevdi` y el demonio `T6evdi`;
+5. copia el módulo a `/lib/modules/$(uname -r)/kernel/drivers/video/`;
+6. instala `/usr/sbin/T6evdi`, `/usr/sbin/T6contrl` y `libevdi.so`;
+7. crea los servicios `T6evdi`, `T6poweron`, `T6powerdown`;
+8. añade `evdi` a `/etc/modules` y `/etc/modprobe.d/evdi.conf`;
+9. fija el kernel (`apt-mark hold`) para que una actualización no rompa `evdi`;
+10. arranca `evdi` y `T6evdi` si la sesión es X11.
+
+En Wayland el script se detiene con un error explicando que hace falta X11.
+Si se quiere instalar igualmente (por ejemplo, para cambiarse a X11 después),
+usar `--allow-wayland`; en ese caso no se arranca `T6evdi`.
+
+Tras la instalación se recomienda reiniciar el equipo.
 
 ### 5.4. Verificación tras el reinicio
 
@@ -206,6 +251,9 @@ Resultado esperado:
 - Servicios `T6evdi`/`T6poweron`/`T6powerdown` activos.
 - Nueva salida en `xrandr` (normalmente `DVI-I-1-1` o similar).
 - `xrandr --listproviders` muestra un proveedor extra.
+
+> Esta verificación debe hacerse en una **sesión X11**. En Wayland
+> `xrandr`/`--listproviders` no verán la salida de EVDI.
 
 ### 5.5. Configurar la tercera pantalla
 
@@ -232,17 +280,45 @@ sudo apt-mark unhold linux-generic linux-image-generic linux-headers-generic
 > Si se actualiza el kernel, hay que **recompilar `evdi`** contra el nuevo
 > kernel antes de que el adaptador vuelva a funcionar.
 
+### 5.7. Si estás en Wayland
+
+Ubuntu 26.04 Budgie arranca por defecto en **Wayland (labwc)** y no incluye una
+sesión X11. EVDI/T6 no puede mostrar la pantalla en Wayland.
+
+Opciones:
+
+1. Instalar un escritorio con sesión X11 y elegirlo en la pantalla de login:
+
+   ```bash
+   sudo apt install xfce4
+   ```
+
+   Cerrar sesión, seleccionar la sesión **Xfce** en SDDM y volver a entrar.
+   Después ejecutar `sudo ./install-usb32hdes.sh install`.
+
+2. Instalar con `--allow-wayland` solo deja los archivos preparados; `T6evdi`
+   no se arranca y la pantalla no aparecerá hasta usar X11.
+
+3. Si no se quiere usar X11, la alternativa fiable es Ubuntu 24.04 LTS, que es
+   el entorno para el que MCT publicó el driver.
+
 ---
 
 ## 6. Desinstalación / rollback
 
-El propio `.run` incluye modo de desinstalación:
+La forma recomendada con el script:
+
+```bash
+sudo ./install-usb32hdes.sh uninstall
+```
+
+El `.run` original también incluye modo de desinstalación:
 
 ```bash
 sudo /tmp/ubuntu_T6_250422.run uninstall
 ```
 
-Atención: el script de desinstalación tiene un typo
+Atención: el script de desinstalación del `.run` tiene un typo
 (`/etc/systemmake cleand/system/T6poweron.service`) que puede dejar
 `T6poweron.service` sin borrar. Limpiar a mano si hace falta:
 
@@ -264,7 +340,9 @@ Restaurar el backup de `/etc/modules` y `/etc/modprobe.d` si es necesario.
 ## 7. Alternativas si no funciona
 
 1. **Compilar desde fuente**: usar `evdi_t6_1/` del repo comunitario con el
-   `evdi` de DisplayLink y `make`. El `main.c` ya soporta `0x5601`.
+   `evdi` de DisplayLink y `make`. El `main.c` ya soporta `0x5601`. El script
+   `install-usb32hdes.sh` ya hace esto automáticamente y elige EVDI 1.15.1 en
+   kernels modernos.
 2. **USB-C a HDMI con DP Alt Mode**: sin driver, mejor calidad, si el portátil
    tiene USB-C con salida de vídeo.
 3. **Adaptador DisplayLink**: soporte oficial mediante `evdi`.
